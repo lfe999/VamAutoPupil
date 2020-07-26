@@ -56,9 +56,17 @@ namespace LFE
                 return;
             }
 
-            PupilMorph = MorphControlUI?.GetMorphByDisplayName("Pupils Dialate");
-            EyesClosedLeftMorph = MorphControlUI?.GetMorphByDisplayName("Eyes Closed Left");
-            EyesClosedRightMorph = MorphControlUI?.GetMorphByDisplayName("Eyes Closed Right");
+            // different morph for male and female
+            foreach(var pupilMorphName in new List<string> { "Pupils Dialate", "Pupils Dilate" }) {
+                PupilMorph = MorphControlUI.GetMorphByDisplayName(pupilMorphName);
+                if(PupilMorph != null) {
+                    break;
+                }
+            }
+
+            EyesClosedLeftMorph = MorphControlUI.GetMorphByDisplayName("Eyes Closed Left");
+            EyesClosedRightMorph = MorphControlUI.GetMorphByDisplayName("Eyes Closed Right");
+
 
             AutoBlinker = containingAtom.GetComponentInChildren<DAZMeshEyelidControl>();
 
@@ -90,6 +98,13 @@ namespace LFE
 
         }
 
+        public void OnDestroy()
+        {
+            if (PupilMorph != null)
+            {
+                PupilMorph.morphValue = PupilNeutralValue;
+            }
+        }
 
         float idleCountDown = 0;
         float idleSign = 1;
@@ -99,8 +114,6 @@ namespace LFE
 
         private void Update()
         {
-
-            SuperController.singleton.ClearMessages();
             if (!InitCompleted) { return; }
             if (SuperController.singleton.freezeAnimation) { return; }
 
