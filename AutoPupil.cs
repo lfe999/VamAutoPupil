@@ -269,15 +269,30 @@ namespace LFE
         }
 
         // https://www.nbdtech.com/Blog/archive/2008/04/27/Calculating-the-Perceived-Brightness-of-a-Color.aspx
+        // https://stackoverflow.com/questions/21132037/when-do-i-have-to-multiply-two-colors-together-when-do-i-have-to-add-them
         // return a number between 0 and 1 inclusive
-        private float PerceivedIntensity(Light light, Vector3 toTarget)
+        private float BrightnessOfLightsOnEyes()
         {
-            const int MAX_INTENSITY = 8;
+            var eyePosition = CenterEyePosition;
 
+            // add colors when you want to combine light together
+            var addedColors = GetRelevantLights()
+                .Select(l => l.ColorAtDistantTarget(eyePosition))
+                .Aggregate((acc, c) => acc + c);
+            var perceivedIntensity = addedColors.PerceivedIntensity();
+
+            return Math.Clamp01(perceivedIntensity * 1.5f);
+        }
+    }
+
+    public static class LightExtensions {
+        const int MAX_INTENSITY = 8;
+
+        public static Color ColorAtDistantTarget(this Light light, Vector3 target) {
             var intensity = 0f;
             if (light.type == LightType.Spot || light.type == LightType.Point)
             {
-                var distance = Vector3.Distance(toTarget, light.transform.position);
+                var distance = Vector3.Distance(target, light.transform.position);
                 var distanceProportion = Math.InverseLerp(light.range, 0, distance);
 
                 intensity = light.intensity * Easings.QuadraticEaseOut(distanceProportion);
@@ -291,28 +306,18 @@ namespace LFE
                 intensity = light.intensity;
             }
 
-            var color = light.color * intensity;
+            return light.color * intensity / MAX_INTENSITY;
+        }
+    }
 
+    public static class ColorExtensions {
+        public static float PerceivedIntensity(this Color color)
+        {
             // https://stackoverflow.com/questions/596216/formula-to-determine-brightness-of-rgb-color
             return Math.Sqrt(
                 color.r * color.r * .299f +
                 color.g * color.g * .587f +
-                color.b * color.b * .114f) / MAX_INTENSITY;
-        }
-
-        private float BrightnessOfLightsOnEyes()
-        {
-            var maximum = 0f;
-            var eyePosition = CenterEyePosition;
-            foreach (var light in GetRelevantLights())
-            {
-                var brightness = PerceivedIntensity(light, eyePosition);
-                if (brightness > maximum)
-                {
-                    maximum = brightness;
-                }
-            }
-            return Math.Lerp(0, 1, maximum * 3f);
+                color.b * color.b * .114f);
         }
     }
 
