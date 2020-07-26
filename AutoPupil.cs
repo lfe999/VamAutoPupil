@@ -286,7 +286,7 @@ namespace LFE
             // then add ambient color in
             var globalSky = SkyshopLightController.singleton.skyManager.GlobalSky;
 
-            combinedColor += globalSky.DiffIntensityLM * RenderSettings.ambientLight / MAX_INTENSITY_SLIDER_VALUE;
+            combinedColor += globalSky.DiffIntensityLM * RenderSettings.ambientLight / MAX_INTENSITY_SLIDER_VALUE * 2.5f;
 
             // then add in global skybox color intensity
             // TODO: figure out how to do this better - for now, assume a base color of white and tone it down 40%
