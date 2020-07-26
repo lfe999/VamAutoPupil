@@ -1,0 +1,16 @@
+{ 
+   "licenseType" : "CC BY-SA", 
+   "creatorName" : "LFE", 
+   "packageName" : "AutoPupil0", 
+   "includeVersionsInReferences" : "true", 
+   "description" : "Change pupil size based on lighting conditions",
+   "credits" : "", 
+   "instructions" : "If you make anything with this commercially thats cool.  This license just makes sure that if you change THIS plugin, those changes should be pulled back in here for everyone.",
+   "promotionalLink" : "https://github.com/lfe999/VamAutoPupil",
+   "programVersion" : "1.19.2.2", 
+   "contentList" : [ 
+      "Custom\\Scripts\\LFE\\AutoPupil\\AutoPupil.cs"
+   ], 
+   "dependencies" : { 
+   }
+}
