@@ -273,15 +273,27 @@ namespace LFE
         // return a number between 0 and 1 inclusive
         private float BrightnessOfLightsOnEyes()
         {
+            const float MAX_INTENSITY_SLIDER_VALUE = 10f;
+
             var eyePosition = CenterEyePosition;
 
-            // add colors when you want to combine light together
-            var addedColors = GetRelevantLights()
+            // lights in scene get added first
+            var combinedColor = GetRelevantLights()
                 .Select(l => l.ColorAtDistantTarget(eyePosition))
+                .DefaultIfEmpty(Color.black)
                 .Aggregate((acc, c) => acc + c);
-            var perceivedIntensity = addedColors.PerceivedIntensity();
 
-            return Math.Clamp01(perceivedIntensity * 1.5f);
+            // then add ambient color in
+            var globalSky = SkyshopLightController.singleton.skyManager.GlobalSky;
+
+            combinedColor += globalSky.DiffIntensityLM * RenderSettings.ambientLight / MAX_INTENSITY_SLIDER_VALUE;
+
+            // then add in global skybox color intensity
+            // TODO: figure out how to do this better - for now, assume a base color of white and tone it down 40%
+            var masterMultiplier = globalSky.MasterIntensity / MAX_INTENSITY_SLIDER_VALUE * 0.60f;
+            combinedColor += Color.white * globalSky.DiffIntensity * masterMultiplier;
+
+            return Math.Clamp01(combinedColor.PerceivedIntensity() * 1.5f);
         }
     }
 
