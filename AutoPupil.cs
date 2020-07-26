@@ -187,6 +187,8 @@ namespace LFE
             var defaultBright = BrightnessOfLightsOnEyes();
 
             // calculate any shade from blinking
+            // TODO: see if is there any way to just measure the distance between top and bottom eyelid
+            // to make this more universal
             var blinkDimming = 1f;
             if (AutoBlinker?.currentWeight > 0.35)
             {
