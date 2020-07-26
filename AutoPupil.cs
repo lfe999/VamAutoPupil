@@ -20,6 +20,7 @@ namespace LFE
         private DAZMorph PupilMorph;
         private DAZMorph EyesClosedLeftMorph;
         private DAZMorph EyesClosedRightMorph;
+        private Light[] SceneLights;
 
         public float PupilNeutralValue;
         public JSONStorableFloat DarkAdjustSpeedStorable;
@@ -32,6 +33,8 @@ namespace LFE
         private Vector3 CenterEyePosition => (LeftEye.transform.position + RightEye.transform.position) / 2;
 
         public void InitFields(Atom atom) {
+            InitCompleted = false;
+
             var morphControlUI = (atom.GetStorableByID("geometry") as DAZCharacterSelector).morphsControlUI;
 
             // different morph for male and female
@@ -52,6 +55,8 @@ namespace LFE
 
             HeadControl = atom.freeControllers.FirstOrDefault(c => c.name.Equals("headControl"));
 
+            SceneLights = atom.transform.root.GetComponentsInChildren<Light>();
+
             AutoBlinker = atom.GetComponentInChildren<DAZMeshEyelidControl>();
 
             PupilMorph.morphValue = 0;
@@ -59,6 +64,8 @@ namespace LFE
         }
 
         public void InitUserInterface() {
+            InitCompleted = false;
+
             LightAdjustSpeedStorable = new JSONStorableFloat("Light Adjust Within", 2.00f, 0f, 10f);
             CreateSlider(LightAdjustSpeedStorable);
             RegisterFloat(LightAdjustSpeedStorable);
@@ -91,6 +98,9 @@ namespace LFE
 
             InitFields(containingAtom);
             InitUserInterface();
+
+            SuperController.singleton.onAtomUIDsChangedHandlers += (atomUids) => InitFields(containingAtom);
+            SuperController.singleton.onAtomUIDRenameHandlers += (oldName, newName) => InitFields(containingAtom);
 
             InitCompleted = true;
 
@@ -198,7 +208,7 @@ namespace LFE
         private IEnumerable<Light> GetRelevantLights()
         {
             var eyePosition = CenterEyePosition; // slight cost to calculate over and over in the loop
-            foreach (var light in transform.root.GetComponentsInChildren<Light>())
+            foreach (var light in SceneLights)
             {
                 if (light == null)
                 {
@@ -235,7 +245,6 @@ namespace LFE
                     continue;
                 }
 
-
                 if (light.type == LightType.Spot)
                 {
                     const float angleFudgeFactor = 1.1f;
@@ -247,7 +256,6 @@ namespace LFE
                         continue;
                     }
                 }
-
 
                 yield return light;
             }
