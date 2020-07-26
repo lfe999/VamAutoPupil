@@ -2,9 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
-using UnityEngine.UI;
-using UnityEngine.EventSystems;
-using uFileBrowser;
 using Math = UnityEngine.Mathf;
 
 
@@ -34,7 +31,8 @@ namespace LFE
         private Vector3 LeftEyePosition => (containingAtom.GetStorableByID("lEye") as DAZBone).transform.position;
         private Vector3 RightEyePosition => (containingAtom.GetStorableByID("rEye") as DAZBone).transform.position;
         private Vector3 CenterEyePosition => (LeftEyePosition + RightEyePosition) / 2;
-        private Vector3 HeadControlPosition => containingAtom.freeControllers.FirstOrDefault(c => c.name.Equals("headControl")).transform.position;
+        private FreeControllerV3 HeadControl => containingAtom.freeControllers.FirstOrDefault(c => c.name.Equals("headControl"));
+        private Vector3 HeadControlPosition => HeadControl.transform.position;
 
         private DAZMorph PupilMorph;
         private DAZMorph EyesClosedLeftMorph;
@@ -57,9 +55,11 @@ namespace LFE
             }
 
             // different morph for male and female
-            foreach(var pupilMorphName in new List<string> { "Pupils Dialate", "Pupils Dilate" }) {
+            foreach (var pupilMorphName in new List<string> { "Pupils Dialate", "Pupils Dilate" })
+            {
                 PupilMorph = MorphControlUI.GetMorphByDisplayName(pupilMorphName);
-                if(PupilMorph != null) {
+                if (PupilMorph != null)
+                {
                     break;
                 }
             }
@@ -114,6 +114,9 @@ namespace LFE
 
         private void Update()
         {
+
+            // SuperController.singleton.ClearMessages();
+
             if (!InitCompleted) { return; }
             if (SuperController.singleton.freezeAnimation) { return; }
 
@@ -224,11 +227,9 @@ namespace LFE
 
                 // is the light in front of the containing atom?
                 // note: this is the dotproduct which is cosine of angle between the two vectors
-                var headingDot = Vector3.Dot(HeadControlPosition - lightPosition, light.transform.forward);
-                if (headingDot < 0)
+                var headingDot = Vector3.Dot(HeadControlPosition - lightPosition, HeadControl.transform.forward);
+                if (headingDot > 0)
                 {
-                    // (> 1 is in front)
-                    // (< 0 is behind)
                     continue;
                 }
 
@@ -289,10 +290,12 @@ namespace LFE
             }
 
             var color = light.color * intensity;
+
+            // https://stackoverflow.com/questions/596216/formula-to-determine-brightness-of-rgb-color
             return Math.Sqrt(
-                color.r * color.r * .241f +
-                color.g * color.g * .691f +
-                color.b * color.b * .068f) / MAX_INTENSITY;
+                color.r * color.r * .299f +
+                color.g * color.g * .587f +
+                color.b * color.b * .114f) / MAX_INTENSITY;
         }
 
         private float BrightnessOfLightsOnEyes()
