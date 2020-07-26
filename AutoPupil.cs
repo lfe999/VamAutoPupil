@@ -87,6 +87,8 @@ namespace LFE
             RegisterFloat(IdleMaxDelayStorable);
         }
 
+        SuperController.OnAtomUIDsChanged OnAtomUIDsChangedHander => (_) => InitFields(containingAtom);
+        SuperController.OnAtomUIDRename OnAtomUIDRenameHandler => (_, __) => InitFields(containingAtom);
 
         public override void Init()
         {
@@ -99,8 +101,8 @@ namespace LFE
             InitFields(containingAtom);
             InitUserInterface();
 
-            SuperController.singleton.onAtomUIDsChangedHandlers += (atomUids) => InitFields(containingAtom);
-            SuperController.singleton.onAtomUIDRenameHandlers += (oldName, newName) => InitFields(containingAtom);
+            SuperController.singleton.onAtomUIDsChangedHandlers += OnAtomUIDsChangedHander;
+            SuperController.singleton.onAtomUIDRenameHandlers += OnAtomUIDRenameHandler;
 
             InitCompleted = true;
 
@@ -108,6 +110,9 @@ namespace LFE
 
         public void OnDestroy()
         {
+            SuperController.singleton.onAtomUIDsChangedHandlers -= OnAtomUIDsChangedHander;
+            SuperController.singleton.onAtomUIDRenameHandlers -= OnAtomUIDRenameHandler;
+
             if (PupilMorph != null)
             {
                 PupilMorph.morphValue = PupilNeutralValue;
