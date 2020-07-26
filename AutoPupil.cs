@@ -13,26 +13,9 @@ namespace LFE
 
         public DAZMeshEyelidControl AutoBlinker;
 
-        public GenerateDAZMorphsControlUI MorphControlUI
-        {
-            get {
-                if (containingAtom == null) { return null; }
-
-                var geometry = containingAtom.GetStorableByID("geometry");
-                if (geometry == null) { return null; }
-
-                var dcs = geometry as DAZCharacterSelector;
-                if (dcs == null) { return null; }
-
-                return dcs.morphsControlUI;
-            }
-        }
-
-        private Vector3 LeftEyePosition => (containingAtom.GetStorableByID("lEye") as DAZBone).transform.position;
-        private Vector3 RightEyePosition => (containingAtom.GetStorableByID("rEye") as DAZBone).transform.position;
-        private Vector3 CenterEyePosition => (LeftEyePosition + RightEyePosition) / 2;
-        private FreeControllerV3 HeadControl => containingAtom.freeControllers.FirstOrDefault(c => c.name.Equals("headControl"));
-        private Vector3 HeadControlPosition => HeadControl.transform.position;
+        private DAZBone LeftEye;
+        private DAZBone RightEye;
+        private FreeControllerV3 HeadControl;
 
         private DAZMorph PupilMorph;
         private DAZMorph EyesClosedLeftMorph;
@@ -46,34 +29,36 @@ namespace LFE
         public JSONStorableFloat IdleAdjustSpeedStorable;
         public bool InitCompleted = false;
 
-        public override void Init()
-        {
-            if (containingAtom.type != "Person")
-            {
-                SuperController.LogError($"This plugin needs to be put on a 'Person' atom only, not a '{containingAtom.type}'");
-                return;
-            }
+        private Vector3 CenterEyePosition => (LeftEye.transform.position + RightEye.transform.position) / 2;
+
+        public void InitFields(Atom atom) {
+            var morphControlUI = (atom.GetStorableByID("geometry") as DAZCharacterSelector).morphsControlUI;
 
             // different morph for male and female
             foreach (var pupilMorphName in new List<string> { "Pupils Dialate", "Pupils Dilate" })
             {
-                PupilMorph = MorphControlUI.GetMorphByDisplayName(pupilMorphName);
+                PupilMorph = morphControlUI.GetMorphByDisplayName(pupilMorphName);
                 if (PupilMorph != null)
                 {
                     break;
                 }
             }
 
-            EyesClosedLeftMorph = MorphControlUI.GetMorphByDisplayName("Eyes Closed Left");
-            EyesClosedRightMorph = MorphControlUI.GetMorphByDisplayName("Eyes Closed Right");
+            EyesClosedLeftMorph = morphControlUI.GetMorphByDisplayName("Eyes Closed Left");
+            EyesClosedRightMorph = morphControlUI.GetMorphByDisplayName("Eyes Closed Right");
 
+            LeftEye = atom.GetStorableByID("lEye") as DAZBone;
+            RightEye = atom.GetStorableByID("rEye") as DAZBone;
 
-            AutoBlinker = containingAtom.GetComponentInChildren<DAZMeshEyelidControl>();
+            HeadControl = atom.freeControllers.FirstOrDefault(c => c.name.Equals("headControl"));
+
+            AutoBlinker = atom.GetComponentInChildren<DAZMeshEyelidControl>();
 
             PupilMorph.morphValue = 0;
             PupilNeutralValue = PupilMorph.morphValue;
+        }
 
-
+        public void InitUserInterface() {
             LightAdjustSpeedStorable = new JSONStorableFloat("Light Adjust Within", 2.00f, 0f, 10f);
             CreateSlider(LightAdjustSpeedStorable);
             RegisterFloat(LightAdjustSpeedStorable);
@@ -93,6 +78,19 @@ namespace LFE
             IdleMaxDelayStorable = new JSONStorableFloat("Idle: Next Random Run", 2.50f, 0f, 10f);
             CreateSlider(IdleMaxDelayStorable, rightSide: true);
             RegisterFloat(IdleMaxDelayStorable);
+        }
+
+
+        public override void Init()
+        {
+            if (containingAtom.type != "Person")
+            {
+                SuperController.LogError($"This plugin needs to be put on a 'Person' atom only, not a '{containingAtom.type}'");
+                return;
+            }
+
+            InitFields(containingAtom);
+            InitUserInterface();
 
             InitCompleted = true;
 
@@ -145,7 +143,7 @@ namespace LFE
                     // maybe schedule an idle animation - but do not interrupt an animation in progress just for idle
                     if (currentAnimation == null && idleCountDown < 0)
                     {
-                        duration = Math.Max(IdleAdjustSpeedStorable.val, 0.001f);
+                        duration = Math.Max(IdleAdjustSpeedStorable.val, 0.01f);
                         idleSign = idleSign * -1;
                         targetValue = targetValue + (idleSign * UnityEngine.Random.Range(0.01f, IdleStrengthStorable.val));
 
@@ -159,18 +157,10 @@ namespace LFE
                 else
                 {
                     // schedule brightness adjustment animation - override any currently running animation for this one. light always wins
-                    if (targetValue > currentValue)
-                    {
-                        // darkess has come
-                        duration = DarkAdjustSpeedStorable.val;
-                    }
-                    else
-                    {
-                        // dawn of a new day
-                        duration = LightAdjustSpeedStorable.val;
-                    }
+                    duration = targetValue > currentValue
+                        ? DarkAdjustSpeedStorable.val
+                        : LightAdjustSpeedStorable.val;
                     currentAnimation = new EyeDialationAnimation(currentValue, targetValue, duration, (p) => Easings.ElasticEaseOut(p));
-
                 }
 
                 lastBrightness = brightness;
@@ -179,10 +169,8 @@ namespace LFE
             {
                 SuperController.LogError(ex.ToString());
             }
-
         }
 
-        float lastprint = 0;
         private float CalculateBrightness()
         {
             // calculate brightness of lights
@@ -209,7 +197,7 @@ namespace LFE
 
         private IEnumerable<Light> GetRelevantLights()
         {
-            var eyePosition = CenterEyePosition;
+            var eyePosition = CenterEyePosition; // slight cost to calculate over and over in the loop
             foreach (var light in transform.root.GetComponentsInChildren<Light>())
             {
                 if (light == null)
@@ -217,22 +205,11 @@ namespace LFE
                     continue;
                 }
 
-                var lightPosition = light.transform.position;
-
                 if (!light.isActiveAndEnabled)
                 {
                     // SuperController.LogMessage($"{light} not active");
                     continue;
                 }
-
-                // is the light in front of the containing atom?
-                // note: this is the dotproduct which is cosine of angle between the two vectors
-                var headingDot = Vector3.Dot(HeadControlPosition - lightPosition, HeadControl.transform.forward);
-                if (headingDot > 0)
-                {
-                    continue;
-                }
-
 
                 if (light.type == LightType.Area)
                 {
@@ -242,17 +219,27 @@ namespace LFE
 
                 if (light.type == LightType.Spot || light.type == LightType.Point)
                 {
-                    if (Vector3.Distance(eyePosition, lightPosition) > light.range)
+                    if (Vector3.Distance(eyePosition, light.transform.position) > light.range)
                     {
                         // SuperController.LogMessage($"{light} out of range");
                         continue;
                     }
                 }
 
+
+                // is the light in front of the containing atom?
+                // note: this is the dotproduct which is cosine of angle between the two vectors
+                var headingDot = Vector3.Dot(HeadControl.transform.position - light.transform.position, HeadControl.transform.forward);
+                if (headingDot > 0)
+                {
+                    continue;
+                }
+
+
                 if (light.type == LightType.Spot)
                 {
                     const float angleFudgeFactor = 1.1f;
-                    var angle = Vector3.Angle(eyePosition - lightPosition, light.transform.forward) * angleFudgeFactor;
+                    var angle = Vector3.Angle(eyePosition - light.transform.position, light.transform.forward) * angleFudgeFactor;
                     // SuperController.LogMessage($"angle = {angle} spotAngle = {light.spotAngle}");
                     if (angle * 2 > light.spotAngle)
                     {
@@ -268,7 +255,7 @@ namespace LFE
 
         // https://www.nbdtech.com/Blog/archive/2008/04/27/Calculating-the-Perceived-Brightness-of-a-Color.aspx
         // return a number between 0 and 1 inclusive
-        private float PerceivedIntensity(Vector3 toTarget, Light light)
+        private float PerceivedIntensity(Light light, Vector3 toTarget)
         {
             const int MAX_INTENSITY = 8;
 
@@ -304,7 +291,7 @@ namespace LFE
             var eyePosition = CenterEyePosition;
             foreach (var light in GetRelevantLights())
             {
-                var brightness = PerceivedIntensity(eyePosition, light);
+                var brightness = PerceivedIntensity(light, eyePosition);
                 if (brightness > maximum)
                 {
                     maximum = brightness;
