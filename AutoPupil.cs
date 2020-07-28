@@ -151,17 +151,28 @@ namespace LFE
             var mainControl = screen.freeControllers[0];
             mainControl.transform.parent = head.transform;
             mainControl.transform.localPosition = detectorOffset;
+            mainControl.transform.localRotation = Quaternion.identity;
+#if !LFE_DEBUG
             mainControl.currentRotationState = FreeControllerV3.RotationState.Off;
             mainControl.currentPositionState = FreeControllerV3.PositionState.Off;
+#endif
             imageObject.localScale = new Vector3(0.105f, 0.08f, 0.05f);
 
+#if LFE_DEBUG
+            SuperController.LogMessage($"targetCamera = {CameraTarget.centerTarget.targetCamera}");
+#endif
 
             // create the camera that reads the light
             _detector = gameObject.AddComponent<BrightnessDetector>();
             _detector.PollFrequency = BRIGHTNESS_POLL_DEFAULT;
-            _detector.Detector.CopyFrom(CameraTarget.centerTarget.targetCamera);
+            _detector.Detector.CopyFrom(SuperController.singleton.MonitorCenterCamera);
             _detector.Detector.transform.parent = head.transform;
             _detector.Detector.transform.localPosition = detectorCameraOffset;
+            _detector.Detector.transform.localRotation = Quaternion.identity * Quaternion.Euler(0, 180, 0);
+            _detector.Detector.name = "BrightnessDetector";
+            _detector.Detector.tag = "BrightnessDetector";
+            _detector.Detector.clearFlags = CameraClearFlags.SolidColor;
+            _detector.Detector.backgroundColor = Color.black;
             _detector.Detector.depth = CameraTarget.centerTarget.targetCamera.depth - 1;
             _detector.Detector.cullingMask |= 1 << _layerMask;
 
@@ -216,6 +227,16 @@ namespace LFE
         {
             if (!_initCompleted) { return; }
             if (SuperController.singleton.freezeAnimation) { return; }
+#if LFE_DEBUG
+            if(Input.GetKey("up")) {
+                CameraTarget.centerTarget.targetCamera.enabled = false;
+                _detector.Detector.enabled = true;
+            }
+            else {
+                CameraTarget.centerTarget.targetCamera.enabled = true;
+                _detector.Detector.enabled = true;
+            }
+#endif
 
             try
             {
@@ -429,11 +450,6 @@ namespace LFE
             cameraHolder.parent = transform;
 
             Detector = cameraHolder.gameObject.AddComponent<Camera>();
-            Detector.transform.localPosition = Vector3.forward;
-            Detector.name = "BrightnessDetector";
-            Detector.tag = "BrightnessDetector";
-            Detector.clearFlags = CameraClearFlags.SolidColor;
-            Detector.backgroundColor = Color.black;
         }
 
         void Update()
@@ -483,10 +499,12 @@ namespace LFE
 
                 // stop capturing the screen
                 Detector.targetTexture = null;
+#if !LFE_DEBUG
                 if (PollFrequency > 0)
                 {
                     Detector.enabled = false;
                 }
+#endif
             }
 
             pollCountdown -= Time.deltaTime;
@@ -498,10 +516,12 @@ namespace LFE
             else
             {
                 // schedule the next update to capture the screen
+#if !LFE_DEBUG
                 if (PollFrequency > 0)
                 {
                     Detector.enabled = true;
                 }
+#endif
                 pollCountdown = PollFrequency;
                 Detector.targetTexture = cameraRenderTexture;
             }
