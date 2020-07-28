@@ -1,72 +1,67 @@
+// #define LFE_DEBUG
+
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using Math = UnityEngine.Mathf;
 
-
 namespace LFE
 {
-
     public class AutoPupil : MVRScript
     {
-
-        public DAZMeshEyelidControl AutoBlinker;
-
-        private DAZBone LeftEye;
-        private DAZBone RightEye;
-        private FreeControllerV3 HeadControl;
-
-        private DAZMorph PupilMorph;
-        private DAZMorph EyesClosedLeftMorph;
-        private DAZMorph EyesClosedRightMorph;
-        private Light[] SceneLights;
-
         public float PupilNeutralValue;
         public JSONStorableFloat DarkAdjustSpeedStorable;
         public JSONStorableFloat LightAdjustSpeedStorable;
         public JSONStorableFloat IdleMaxDelayStorable;
         public JSONStorableFloat IdleStrengthStorable;
         public JSONStorableFloat IdleAdjustSpeedStorable;
-        public bool InitCompleted = false;
 
-        private Vector3 CenterEyePosition => (LeftEye.transform.position + RightEye.transform.position) / 2;
+        private bool _initCompleted = false;
+        private DAZMeshEyelidControl _autoBlinker;
+        private DAZMorph _pupilMorph;
+        private DAZMorph _eyesClosedLeftMorph;
+        private DAZMorph _eyesClosedRightMorph;
+        private BrightnessDetector _detector;
+        private JSONStorableString _screenAtomUid; // so that when scene loads up this special atom is remembered
+        private int _layerMask;
+        private float _idleCountDown = 0;
+        private float _idleSign = 1;
+        private float _lastBrightness;
+        private EyeDialationAnimation _currentAnimation = null;
 
-        public void InitFields(Atom atom) {
-            InitCompleted = false;
+        public void InitFields(Atom atom)
+        {
+            _initCompleted = false;
 
             var morphControlUI = (atom.GetStorableByID("geometry") as DAZCharacterSelector).morphsControlUI;
 
             // different morph for male and female
             foreach (var pupilMorphName in new List<string> { "Pupils Dialate", "Pupils Dilate" })
             {
-                PupilMorph = morphControlUI.GetMorphByDisplayName(pupilMorphName);
-                if (PupilMorph != null)
+                _pupilMorph = morphControlUI.GetMorphByDisplayName(pupilMorphName);
+                if (_pupilMorph != null)
                 {
                     break;
                 }
             }
 
-            EyesClosedLeftMorph = morphControlUI.GetMorphByDisplayName("Eyes Closed Left");
-            EyesClosedRightMorph = morphControlUI.GetMorphByDisplayName("Eyes Closed Right");
+            _eyesClosedLeftMorph = morphControlUI.GetMorphByDisplayName("Eyes Closed Left");
+            _eyesClosedRightMorph = morphControlUI.GetMorphByDisplayName("Eyes Closed Right");
 
-            LeftEye = atom.GetStorableByID("lEye") as DAZBone;
-            RightEye = atom.GetStorableByID("rEye") as DAZBone;
+            _autoBlinker = atom.GetComponentInChildren<DAZMeshEyelidControl>();
 
-            HeadControl = atom.freeControllers.FirstOrDefault(c => c.name.Equals("headControl"));
+            _pupilMorph.morphValue = 0;
+            PupilNeutralValue = _pupilMorph.morphValue;
 
-            SceneLights = atom.transform.root.GetComponentsInChildren<Light>();
-
-            AutoBlinker = atom.GetComponentInChildren<DAZMeshEyelidControl>();
-
-            PupilMorph.morphValue = 0;
-            PupilNeutralValue = PupilMorph.morphValue;
         }
 
-        public void InitUserInterface() {
-            InitCompleted = false;
+        public void InitUserInterface()
+        {
+            _initCompleted = false;
 
-            LightAdjustSpeedStorable = new JSONStorableFloat("Light Adjust Within", 2.00f, 0f, 10f);
+            LightAdjustSpeedStorable = new JSONStorableFloat("Light Adjust Within", 3.50f, 0f, 10f);
             CreateSlider(LightAdjustSpeedStorable);
             RegisterFloat(LightAdjustSpeedStorable);
 
@@ -85,10 +80,9 @@ namespace LFE
             IdleMaxDelayStorable = new JSONStorableFloat("Idle: Next Random Run", 2.50f, 0f, 10f);
             CreateSlider(IdleMaxDelayStorable, rightSide: true);
             RegisterFloat(IdleMaxDelayStorable);
-        }
 
-        SuperController.OnAtomUIDsChanged OnAtomUIDsChangedHander => (_) => InitFields(containingAtom);
-        SuperController.OnAtomUIDRename OnAtomUIDRenameHandler => (_, __) => InitFields(containingAtom);
+            _screenAtomUid = new JSONStorableString("DetectorAtomUid", GenerateAtomName("LightDetector", 5)); // save this so we can restore it
+        }
 
         public override void Init()
         {
@@ -98,75 +92,161 @@ namespace LFE
                 return;
             }
 
+            StartCoroutine(InitCoroutine());
+        }
+
+        private IEnumerator InitCoroutine()
+        {
+
             InitFields(containingAtom);
             InitUserInterface();
 
-            SuperController.singleton.onAtomUIDsChangedHandlers += OnAtomUIDsChangedHander;
-            SuperController.singleton.onAtomUIDRenameHandlers += OnAtomUIDRenameHandler;
+            // find any unused layer mask and just pick that
+            _layerMask = Enumerable.Range(0, 31).FirstOrDefault(i => LayerMask.LayerToName(i).Equals(""));
+#if LFE_DEBUG
+            for(var i = 0; i < 32; i++) {
+                SuperController.LogMessage($"layer {i}: {LayerMask.LayerToName(i)}");
+            }
+#endif
 
-            InitCompleted = true;
+            var sc = SuperController.singleton;
+            var head = containingAtom.rigidbodies.FirstOrDefault(rb => rb.name.Equals("head"));
+            var screen = sc.GetAtomByUid(_screenAtomUid.val);
 
+            // create the screen that the camera will be looking at for light colors
+            // place it on a special layer so we can show just this later on
+            if (screen == null)
+            {
+                yield return sc.AddAtomByType("ImagePanel", useuid: _screenAtomUid.val);
+                screen = sc.GetAtomByUid(_screenAtomUid.val);
+            }
+            var imageObject = screen.transform.Find("reParentObject/object");
+            var detectorOffset = (Vector3.up * 0.06f) + (Vector3.forward * 0.11f);
+            var detectorCameraOffset = detectorOffset + (Vector3.forward * 0.05f);
+
+            screen.hidden = true;
+            foreach (var t in ChildTransforms(imageObject))
+            {
+                t.gameObject.layer = _layerMask;
+            }
+
+            foreach (var r in imageObject.GetComponentsInChildren<Renderer>())
+            {
+                r.material.color = Color.black;
+            }
+
+            var mainControl = screen.freeControllers[0];
+            mainControl.transform.parent = head.transform;
+            mainControl.transform.localPosition = detectorOffset;
+            mainControl.currentRotationState = FreeControllerV3.RotationState.Off;
+            mainControl.currentPositionState = FreeControllerV3.PositionState.Off;
+            imageObject.localScale = new Vector3(0.105f, 0.08f, 0.05f);
+
+
+            // create the camera that reads the light
+            _detector = gameObject.AddComponent<BrightnessDetector>();
+            _detector.Detector.CopyFrom(CameraTarget.centerTarget.targetCamera);
+            _detector.Detector.transform.parent = head.transform;
+            _detector.Detector.transform.localPosition = detectorCameraOffset;
+            _detector.Detector.depth = CameraTarget.centerTarget.targetCamera.depth - 1;
+            _detector.Detector.cullingMask |= 1 << _layerMask;
+
+            // hide the screen created above from all cameras except out _detector
+            foreach (var camera in Camera.allCameras)
+            {
+                if (camera.tag != _detector.Detector.tag)
+                {
+                    camera.cullingMask &= ~(1 << _layerMask);
+                }
+            }
+#if LFE_DEBUG
+            // enable the visibility of the screen in debug
+            foreach(var camera in Camera.allCameras) {
+                camera.cullingMask |= 1 << _layerMask;
+            }
+#endif
+
+            _initCompleted = true;
         }
 
         public void OnDestroy()
         {
-            SuperController.singleton.onAtomUIDsChangedHandlers -= OnAtomUIDsChangedHander;
-            SuperController.singleton.onAtomUIDRenameHandlers -= OnAtomUIDRenameHandler;
-
-            if (PupilMorph != null)
+            if (_pupilMorph != null)
             {
-                PupilMorph.morphValue = PupilNeutralValue;
+                _pupilMorph.morphValue = PupilNeutralValue;
             }
+
+            // restore built in camera cullingMasks
+            foreach (var camera in Camera.allCameras)
+            {
+                if (camera.tag != _detector.Detector.tag)
+                {
+                    camera.cullingMask |= 1 << _layerMask;
+                }
+            }
+
+            // remove the light detection atom
+            if (!string.IsNullOrEmpty(_screenAtomUid.val))
+            {
+                var atom = SuperController.singleton.GetAtomByUid(_screenAtomUid.val);
+                if (atom != null)
+                {
+                    SuperController.singleton.RemoveAtom(atom);
+                }
+            }
+
+            Destroy(_detector);
         }
 
-        float idleCountDown = 0;
-        float idleSign = 1;
-        float lastBrightness;
+        void OnEnable()
+        {
+            _detector.gameObject.SetActive(true);
+        }
 
-        EyeDialationAnimation currentAnimation = null;
+        void OnDisable()
+        {
+            _detector.gameObject.SetActive(false);
+        }
 
         private void Update()
         {
-
-            // SuperController.singleton.ClearMessages();
-
-            if (!InitCompleted) { return; }
+            if (!_initCompleted) { return; }
             if (SuperController.singleton.freezeAnimation) { return; }
 
             try
             {
                 // run the scheduled animation
-                if (currentAnimation != null)
+                if (_currentAnimation != null)
                 {
-                    PupilMorph.morphValueAdjustLimits = Math.Clamp(currentAnimation.Update(), -1.5f, 2.0f);
-                    if (currentAnimation.IsFinished)
+                    _pupilMorph.morphValueAdjustLimits = Math.Clamp(_currentAnimation.Update(), -1.5f, 2.0f);
+                    if (_currentAnimation.IsFinished)
                     {
-                        currentAnimation = null;
+                        _currentAnimation = null;
 
                         // schedule a new idle
-                        idleCountDown = UnityEngine.Random.Range(0.01f, Math.Max(IdleMaxDelayStorable.val, 0.01f));
+                        _idleCountDown = UnityEngine.Random.Range(0.01f, Math.Max(IdleMaxDelayStorable.val, 0.01f));
                     }
                 }
 
                 var brightness = CalculateBrightness();
-                var currentValue = PupilMorph.morphValue;
+                var currentValue = _pupilMorph.morphValue;
                 var targetValue = BrightnessToMorphValue(brightness);
                 var duration = 0f;
 
-                if (lastBrightness == brightness)
+                if (_lastBrightness == brightness)
                 {
                     // maybe schedule an idle animation - but do not interrupt an animation in progress just for idle
-                    if (currentAnimation == null && idleCountDown < 0)
+                    if (_currentAnimation == null && _idleCountDown < 0)
                     {
                         duration = Math.Max(IdleAdjustSpeedStorable.val, 0.01f);
-                        idleSign = idleSign * -1;
-                        targetValue = targetValue + (idleSign * UnityEngine.Random.Range(0.01f, IdleStrengthStorable.val));
+                        _idleSign = _idleSign * -1;
+                        targetValue = targetValue + (_idleSign * UnityEngine.Random.Range(0.01f, IdleStrengthStorable.val));
 
-                        currentAnimation = new EyeDialationAnimation(currentValue, targetValue, duration, (p) => Easings.BackEaseOut(p));
+                        _currentAnimation = new EyeDialationAnimation(currentValue, targetValue, duration, (p) => Easings.BackEaseOut(p));
                     }
                     else
                     {
-                        idleCountDown -= Time.deltaTime;
+                        _idleCountDown -= Time.deltaTime;
                     }
                 }
                 else
@@ -175,10 +255,10 @@ namespace LFE
                     duration = targetValue > currentValue
                         ? DarkAdjustSpeedStorable.val
                         : LightAdjustSpeedStorable.val;
-                    currentAnimation = new EyeDialationAnimation(currentValue, targetValue, duration, (p) => Easings.ElasticEaseOut(p));
+                    _currentAnimation = new EyeDialationAnimation(currentValue, targetValue, duration, (p) => Easings.ElasticEaseOut(p));
                 }
 
-                lastBrightness = brightness;
+                _lastBrightness = brightness;
             }
             catch (Exception ex)
             {
@@ -189,19 +269,18 @@ namespace LFE
         private float CalculateBrightness()
         {
             // calculate brightness of lights
-            var defaultBright = BrightnessOfLightsOnEyes();
+            var defaultBright = _detector.DetectedBrightness;
 
             // calculate any shade from blinking
-            // TODO: see if is there any way to just measure the distance between top and bottom eyelid
-            // to make this more universal
+            // TODO: see if is there any way to just measure the distance between top and bottom eyelid to make this more universal
             var blinkDimming = 1f;
-            if (AutoBlinker?.currentWeight > 0.35)
+            if (_autoBlinker?.currentWeight > 0.35)
             {
-                blinkDimming = Math.SmoothStep(1, 0.25f, AutoBlinker.currentWeight);
+                blinkDimming = Math.SmoothStep(1, 0.25f, _autoBlinker.currentWeight);
             }
-            else if (EyesClosedLeftMorph?.morphValue > 0.35)
+            else if (_eyesClosedLeftMorph?.morphValue > 0.35)
             {
-                blinkDimming = Math.SmoothStep(1, 0.25f, EyesClosedLeftMorph.morphValue);
+                blinkDimming = Math.SmoothStep(1, 0.25f, _eyesClosedLeftMorph.morphValue);
             }
 
             return defaultBright * blinkDimming;
@@ -212,124 +291,30 @@ namespace LFE
             return -1 * Math.Clamp(PupilNeutralValue + Math.Lerp(-1.0f, 1.5f, brightness), -1.0f, 1.5f);
         }
 
-        private IEnumerable<Light> GetRelevantLights()
+        private string GenerateAtomName(string prefix, int length)
         {
-            var eyePosition = CenterEyePosition; // slight cost to calculate over and over in the loop
-            foreach (var light in SceneLights)
-            {
-                if (light == null)
-                {
-                    continue;
-                }
+            var random = new System.Random();
+            const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-                if (!light.isActiveAndEnabled)
-                {
-                    // SuperController.LogMessage($"{light} not active");
-                    continue;
-                }
-
-                if (light.type == LightType.Area)
-                {
-                    // ignore these lights
-                    continue;
-                }
-
-                if (light.type == LightType.Spot || light.type == LightType.Point)
-                {
-                    if (Vector3.Distance(eyePosition, light.transform.position) > light.range)
-                    {
-                        // SuperController.LogMessage($"{light} out of range");
-                        continue;
-                    }
-                }
-
-
-                // is the light in front of the containing atom?
-                // note: this is the dotproduct which is cosine of angle between the two vectors
-                var headingDot = Vector3.Dot(HeadControl.transform.position - light.transform.position, HeadControl.transform.forward);
-                if (headingDot > 0)
-                {
-                    continue;
-                }
-
-                if (light.type == LightType.Spot)
-                {
-                    const float angleFudgeFactor = 1.1f;
-                    var angle = Vector3.Angle(eyePosition - light.transform.position, light.transform.forward) * angleFudgeFactor;
-                    // SuperController.LogMessage($"angle = {angle} spotAngle = {light.spotAngle}");
-                    if (angle * 2 > light.spotAngle)
-                    {
-                        // SuperController.LogMessage($"{light} angle {light.spotAngle} out of range {angle}");
-                        continue;
-                    }
-                }
-
-                yield return light;
-            }
+            var shortRand = new string(Enumerable.Repeat(chars, length).Select(s => s[random.Next(s.Length)]).ToArray());
+            return $"{prefix}-{shortRand}";
         }
 
-        // https://www.nbdtech.com/Blog/archive/2008/04/27/Calculating-the-Perceived-Brightness-of-a-Color.aspx
-        // https://stackoverflow.com/questions/21132037/when-do-i-have-to-multiply-two-colors-together-when-do-i-have-to-add-them
-        // return a number between 0 and 1 inclusive
-        private float BrightnessOfLightsOnEyes()
+        private IEnumerable<Transform> ChildTransforms(Transform parent, int level = 0, string path = "")
         {
-            const float MAX_INTENSITY_SLIDER_VALUE = 10f;
-
-            var eyePosition = CenterEyePosition;
-
-            // lights in scene get added first
-            var combinedColor = GetRelevantLights()
-                .Select(l => l.ColorAtDistantTarget(eyePosition))
-                .DefaultIfEmpty(Color.black)
-                .Aggregate((acc, c) => acc + c);
-
-            // then add ambient color in
-            var globalSky = SkyshopLightController.singleton.skyManager.GlobalSky;
-
-            combinedColor += globalSky.DiffIntensityLM * RenderSettings.ambientLight / MAX_INTENSITY_SLIDER_VALUE * 2.5f;
-
-            // then add in global skybox color intensity
-            // TODO: figure out how to do this better - for now, assume a base color of white and tone it down 40%
-            var masterMultiplier = globalSky.MasterIntensity / MAX_INTENSITY_SLIDER_VALUE * 0.60f;
-            combinedColor += Color.white * globalSky.DiffIntensity * masterMultiplier;
-
-            return Math.Clamp01(combinedColor.PerceivedIntensity() * 1.5f);
-        }
-    }
-
-    public static class LightExtensions {
-        const int MAX_INTENSITY = 8;
-
-        public static Color ColorAtDistantTarget(this Light light, Vector3 target) {
-            var intensity = 0f;
-            if (light.type == LightType.Spot || light.type == LightType.Point)
+            for (var i = 0; i < parent.childCount; i++)
             {
-                var distance = Vector3.Distance(target, light.transform.position);
-                var distanceProportion = Math.InverseLerp(light.range, 0, distance);
-
-                intensity = light.intensity * Easings.QuadraticEaseOut(distanceProportion);
+                var child = parent.GetChild(i);
+                foreach (var c in ChildTransforms(child, level + 1, $"{path}/{child.name}"))
+                {
+                    yield return c;
+                }
+#if LFE_DEBUG
+                SuperController.LogMessage($"xfm {path}/{child.name}");
+#endif
+                yield return child;
             }
-            else if (light.type == LightType.Area)
-            {
-                intensity = 0f;
-            }
-            else
-            {
-                intensity = light.intensity;
-            }
-
-            return light.color * intensity / MAX_INTENSITY;
-        }
-    }
-
-    public static class ColorExtensions {
-        public static float PerceivedIntensity(this Color color)
-        {
-            // https://stackoverflow.com/questions/596216/formula-to-determine-brightness-of-rgb-color
-            return Math.Sqrt(
-                color.r * color.r * .299f +
-                color.g * color.g * .587f +
-                color.b * color.b * .114f);
+            yield break;
         }
     }
 
@@ -368,7 +353,7 @@ namespace LFE
         }
     }
 
-    // https://github.com/acron0/Easings
+    // https://github.com/acron0/Easings for more
     static public class Easings
     {
         /// <summary>
@@ -390,274 +375,11 @@ namespace LFE
         }
 
         /// <summary>
-        /// Modeled after the parabola y = x^2
-        /// </summary>
-        static public float QuadraticEaseIn(float p)
-        {
-            return p * p;
-        }
-
-        /// <summary>
-        /// Modeled after the parabola y = -x^2 + 2x
-        /// </summary>
-        static public float QuadraticEaseOut(float p)
-        {
-            return -(p * (p - 2));
-        }
-
-        /// <summary>
-        /// Modeled after the piecewise quadratic
-        /// y = (1/2)((2x)^2)             ; [0, 0.5)
-        /// y = -(1/2)((2x-1)*(2x-3) - 1) ; [0.5, 1]
-        /// </summary>
-        static public float QuadraticEaseInOut(float p)
-        {
-            if (p < 0.5f)
-            {
-                return 2 * p * p;
-            }
-            else
-            {
-                return (-2 * p * p) + (4 * p) - 1;
-            }
-        }
-
-        /// <summary>
-        /// Modeled after the cubic y = x^3
-        /// </summary>
-        static public float CubicEaseIn(float p)
-        {
-            return p * p * p;
-        }
-
-        /// <summary>
-        /// Modeled after the cubic y = (x - 1)^3 + 1
-        /// </summary>
-        static public float CubicEaseOut(float p)
-        {
-            float f = (p - 1);
-            return f * f * f + 1;
-        }
-
-        /// <summary>
-        /// Modeled after the piecewise cubic
-        /// y = (1/2)((2x)^3)       ; [0, 0.5)
-        /// y = (1/2)((2x-2)^3 + 2) ; [0.5, 1]
-        /// </summary>
-        static public float CubicEaseInOut(float p)
-        {
-            if (p < 0.5f)
-            {
-                return 4 * p * p * p;
-            }
-            else
-            {
-                float f = ((2 * p) - 2);
-                return 0.5f * f * f * f + 1;
-            }
-        }
-
-        /// <summary>
-        /// Modeled after the quartic x^4
-        /// </summary>
-        static public float QuarticEaseIn(float p)
-        {
-            return p * p * p * p;
-        }
-
-        /// <summary>
-        /// Modeled after the quartic y = 1 - (x - 1)^4
-        /// </summary>
-        static public float QuarticEaseOut(float p)
-        {
-            float f = (p - 1);
-            return f * f * f * (1 - p) + 1;
-        }
-
-        /// <summary>
-        // Modeled after the piecewise quartic
-        // y = (1/2)((2x)^4)        ; [0, 0.5)
-        // y = -(1/2)((2x-2)^4 - 2) ; [0.5, 1]
-        /// </summary>
-        static public float QuarticEaseInOut(float p)
-        {
-            if (p < 0.5f)
-            {
-                return 8 * p * p * p * p;
-            }
-            else
-            {
-                float f = (p - 1);
-                return -8 * f * f * f * f + 1;
-            }
-        }
-
-        /// <summary>
-        /// Modeled after the quintic y = x^5
-        /// </summary>
-        static public float QuinticEaseIn(float p)
-        {
-            return p * p * p * p * p;
-        }
-
-        /// <summary>
-        /// Modeled after the quintic y = (x - 1)^5 + 1
-        /// </summary>
-        static public float QuinticEaseOut(float p)
-        {
-            float f = (p - 1);
-            return f * f * f * f * f + 1;
-        }
-
-        /// <summary>
-        /// Modeled after the piecewise quintic
-        /// y = (1/2)((2x)^5)       ; [0, 0.5)
-        /// y = (1/2)((2x-2)^5 + 2) ; [0.5, 1]
-        /// </summary>
-        static public float QuinticEaseInOut(float p)
-        {
-            if (p < 0.5f)
-            {
-                return 16 * p * p * p * p * p;
-            }
-            else
-            {
-                float f = ((2 * p) - 2);
-                return 0.5f * f * f * f * f * f + 1;
-            }
-        }
-
-        /// <summary>
-        /// Modeled after quarter-cycle of sine wave
-        /// </summary>
-        static public float SineEaseIn(float p)
-        {
-            return Math.Sin((p - 1) * HALFPI) + 1;
-        }
-
-        /// <summary>
-        /// Modeled after quarter-cycle of sine wave (different phase)
-        /// </summary>
-        static public float SineEaseOut(float p)
-        {
-            return Math.Sin(p * HALFPI);
-        }
-
-        /// <summary>
-        /// Modeled after half sine wave
-        /// </summary>
-        static public float SineEaseInOut(float p)
-        {
-            return 0.5f * (1 - Math.Cos(p * PI));
-        }
-
-        /// <summary>
-        /// Modeled after shifted quadrant IV of unit circle
-        /// </summary>
-        static public float CircularEaseIn(float p)
-        {
-            return 1 - Math.Sqrt(1 - (p * p));
-        }
-
-        /// <summary>
-        /// Modeled after shifted quadrant II of unit circle
-        /// </summary>
-        static public float CircularEaseOut(float p)
-        {
-            return Math.Sqrt((2 - p) * p);
-        }
-
-        /// <summary>
-        /// Modeled after the piecewise circular function
-        /// y = (1/2)(1 - Math.Sqrt(1 - 4x^2))           ; [0, 0.5)
-        /// y = (1/2)(Math.Sqrt(-(2x - 3)*(2x - 1)) + 1) ; [0.5, 1]
-        /// </summary>
-        static public float CircularEaseInOut(float p)
-        {
-            if (p < 0.5f)
-            {
-                return 0.5f * (1 - Math.Sqrt(1 - 4 * (p * p)));
-            }
-            else
-            {
-                return 0.5f * (Math.Sqrt(-((2 * p) - 3) * ((2 * p) - 1)) + 1);
-            }
-        }
-
-        /// <summary>
-        /// Modeled after the exponential function y = 2^(10(x - 1))
-        /// </summary>
-        static public float ExponentialEaseIn(float p)
-        {
-            return (p == 0.0f) ? p : Math.Pow(2, 10 * (p - 1));
-        }
-
-        /// <summary>
-        /// Modeled after the exponential function y = -2^(-10x) + 1
-        /// </summary>
-        static public float ExponentialEaseOut(float p)
-        {
-            return (p == 1.0f) ? p : 1 - Math.Pow(2, -10 * p);
-        }
-
-        /// <summary>
-        /// Modeled after the piecewise exponential
-        /// y = (1/2)2^(10(2x - 1))         ; [0,0.5)
-        /// y = -(1/2)*2^(-10(2x - 1))) + 1 ; [0.5,1]
-        /// </summary>
-        static public float ExponentialEaseInOut(float p)
-        {
-            if (p == 0.0 || p == 1.0) return p;
-
-            if (p < 0.5f)
-            {
-                return 0.5f * Math.Pow(2, (20 * p) - 10);
-            }
-            else
-            {
-                return -0.5f * Math.Pow(2, (-20 * p) + 10) + 1;
-            }
-        }
-
-        /// <summary>
-        /// Modeled after the damped sine wave y = sin(13pi/2*x)*Math.Pow(2, 10 * (x - 1))
-        /// </summary>
-        static public float ElasticEaseIn(float p)
-        {
-            return Math.Sin(13 * HALFPI * p) * Math.Pow(2, 10 * (p - 1));
-        }
-
-        /// <summary>
         /// Modeled after the damped sine wave y = sin(-13pi/2*(x + 1))*Math.Pow(2, -10x) + 1
         /// </summary>
         static public float ElasticEaseOut(float p)
         {
             return Math.Sin(-13 * HALFPI * (p + 1)) * Math.Pow(2, -10 * p) + 1;
-        }
-
-        /// <summary>
-        /// Modeled after the piecewise exponentially-damped sine wave:
-        /// y = (1/2)*sin(13pi/2*(2*x))*Math.Pow(2, 10 * ((2*x) - 1))      ; [0,0.5)
-        /// y = (1/2)*(sin(-13pi/2*((2x-1)+1))*Math.Pow(2,-10(2*x-1)) + 2) ; [0.5, 1]
-        /// </summary>
-        static public float ElasticEaseInOut(float p)
-        {
-            if (p < 0.5f)
-            {
-                return 0.5f * Math.Sin(13 * HALFPI * (2 * p)) * Math.Pow(2, 10 * ((2 * p) - 1));
-            }
-            else
-            {
-                return 0.5f * (Math.Sin(-13 * HALFPI * ((2 * p - 1) + 1)) * Math.Pow(2, -10 * (2 * p - 1)) + 2);
-            }
-        }
-
-        /// <summary>
-        /// Modeled after the overshooting cubic y = x^3-x*sin(x*pi)
-        /// </summary>
-        static public float BackEaseIn(float p)
-        {
-            return p * p * p - p * Math.Sin(p * PI);
         }
 
         /// <summary>
@@ -668,68 +390,123 @@ namespace LFE
             float f = (1 - p);
             return 1 - (f * f * f - f * Math.Sin(f * PI));
         }
+    }
 
-        /// <summary>
-        /// Modeled after the piecewise overshooting cubic function:
-        /// y = (1/2)*((2x)^3-(2x)*sin(2*x*pi))           ; [0, 0.5)
-        /// y = (1/2)*(1-((1-x)^3-(1-x)*sin((1-x)*pi))+1) ; [0.5, 1]
-        /// </summary>
-        static public float BackEaseInOut(float p)
+    public class BrightnessDetector : MonoBehaviour
+    {
+        private const int CAMERA_IMG_WITDH = 128;
+        private const int CAMERA_IMG_HEIGHT = 128;
+
+        public Camera Detector { get; private set; }
+        public float DetectedBrightness { get; private set; }
+        public Color DetectedColor { get; private set; }
+        public float PollFrequency { get; private set; }
+
+        private float pollCountdown;
+        private RenderTexture cameraRenderTexture;
+        private Texture2D cameraTexture2d;
+
+        void Awake()
         {
-            if (p < 0.5f)
+            pollCountdown = 0;
+            cameraRenderTexture = null;
+            cameraTexture2d = new Texture2D(CAMERA_IMG_WITDH, CAMERA_IMG_HEIGHT);
+
+            PollFrequency = 0.1f;
+            DetectedBrightness = 0;
+            DetectedColor = Color.black;
+
+            Transform cameraHolder = new GameObject("CameraHolder").transform;
+            cameraHolder.parent = transform;
+
+            Detector = cameraHolder.gameObject.AddComponent<Camera>();
+            Detector.transform.localPosition = Vector3.forward;
+            Detector.name = "BrightnessDetector";
+            Detector.tag = "BrightnessDetector";
+            Detector.clearFlags = CameraClearFlags.SolidColor;
+            Detector.backgroundColor = Color.black;
+        }
+
+        void Update()
+        {
+            if (cameraRenderTexture != null)
             {
-                float f = 2 * p;
-                return 0.5f * (f * f * f - f * Math.Sin(f * PI));
+                // get a copy of the pixels into a Texture2D
+                if (cameraTexture2d.width != cameraRenderTexture.width || cameraTexture2d.height != cameraRenderTexture.height)
+                {
+                    cameraTexture2d.Resize(cameraRenderTexture.width, cameraRenderTexture.height);
+                }
+
+                var previous = RenderTexture.active;
+                RenderTexture.active = cameraRenderTexture;
+                cameraTexture2d.ReadPixels(new Rect(0, 0, cameraRenderTexture.width, cameraRenderTexture.height), 0, 0);
+                cameraTexture2d.Apply();
+                RenderTexture.active = previous;
+
+                // average the colors in the image
+                var colors = cameraTexture2d.GetPixels32();
+                var total = colors.Length;
+                var r = 0; var g = 0; var b = 0; var a = 0;
+                for (int i = 0; i < total; i++)
+                {
+                    r += colors[i].r;
+                    g += colors[i].g;
+                    b += colors[i].b;
+                    a += colors[i].a;
+                }
+                var color = new Color(r / total, g / total, b / total, a / total);
+                // https://stackoverflow.com/questions/596216/formula-to-determine-brightness-of-rgb-color
+                var brightness = Math.Sqrt(
+                    color.r * color.r * .299f +
+                    color.g * color.g * .587f +
+                    color.b * color.b * .114f
+                ) / 255;
+                if (brightness > 1) { brightness = 1; }
+                else if (brightness < 0) { brightness = 0; }
+
+                // set our public properties now
+                DetectedColor = color;
+                DetectedBrightness = brightness;
+#if LFE_DEBUG
+                SuperController.LogMessage($"color = {color} brightness = {brightness}");
+#endif
+
+                // stop capturing the screen
+                Detector.depth -= 2;
+                Detector.targetTexture = null;
+                RenderTexture.ReleaseTemporary(cameraRenderTexture);
+                cameraRenderTexture = null;
+            }
+
+            pollCountdown -= Time.deltaTime;
+            if (pollCountdown > 0)
+            {
+                // wait
+                return;
             }
             else
             {
-                float f = (1 - (2 * p - 1));
-                return 0.5f * (1 - (f * f * f - f * Math.Sin(f * PI))) + 0.5f;
+                // schedule the next update to capture the screen
+                pollCountdown = PollFrequency;
+                cameraRenderTexture = RenderTexture.GetTemporary(CAMERA_IMG_WITDH, CAMERA_IMG_HEIGHT, 16);
+                Detector.targetTexture = cameraRenderTexture;
+                Detector.depth += 2;
             }
         }
 
-        /// <summary>
-        /// </summary>
-        static public float BounceEaseIn(float p)
+        void OnDestroy()
         {
-            return 1 - BounceEaseOut(1 - p);
-        }
-
-        /// <summary>
-        /// </summary>
-        static public float BounceEaseOut(float p)
-        {
-            if (p < 4 / 11.0f)
+            if (cameraRenderTexture != null)
             {
-                return (121 * p * p) / 16.0f;
+                Detector.targetTexture = null;
+                RenderTexture.ReleaseTemporary(cameraRenderTexture);
+                cameraRenderTexture = null;
             }
-            else if (p < 8 / 11.0f)
+            Destroy(Detector);
+            if (cameraTexture2d != null)
             {
-                return (363 / 40.0f * p * p) - (99 / 10.0f * p) + 17 / 5.0f;
-            }
-            else if (p < 9 / 10.0f)
-            {
-                return (4356 / 361.0f * p * p) - (35442 / 1805.0f * p) + 16061 / 1805.0f;
-            }
-            else
-            {
-                return (54 / 5.0f * p * p) - (513 / 25.0f * p) + 268 / 25.0f;
-            }
-        }
-
-        /// <summary>
-        /// </summary>
-        static public float BounceEaseInOut(float p)
-        {
-            if (p < 0.5f)
-            {
-                return 0.5f * BounceEaseIn(p * 2);
-            }
-            else
-            {
-                return 0.5f * BounceEaseOut(p * 2 - 1) + 0.5f;
+                Destroy(cameraTexture2d);
             }
         }
     }
-
 }
