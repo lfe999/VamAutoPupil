@@ -11,12 +11,19 @@ namespace LFE
 {
     public class AutoPupil : MVRScript
     {
+
+        // https://jamanetwork.com/journals/jama/article-abstract/286369
+        // https://en.wikipedia.org/wiki/Pupillary_light_reflex
+        // https://www.nursingtimes.net/clinical-archive/neurology/neurological-assessment-part-2-pupillary-assessment-15-07-2008/
+        private const float BRIGHTNESS_POLL_DEFAULT = 0.25f;
+
         public float PupilNeutralValue;
         public JSONStorableFloat DarkAdjustSpeedStorable;
         public JSONStorableFloat LightAdjustSpeedStorable;
         public JSONStorableFloat IdleMaxDelayStorable;
         public JSONStorableFloat IdleStrengthStorable;
         public JSONStorableFloat IdleAdjustSpeedStorable;
+        public JSONStorableFloat BrightnessPollIntervalStorable;
 
         private bool _initCompleted = false;
         private DAZMeshEyelidControl _autoBlinker;
@@ -30,6 +37,8 @@ namespace LFE
         private float _idleSign = 1;
         private float _lastBrightness;
         private EyeDialationAnimation _currentAnimation = null;
+        private float _brightnessChangeThrottle = 0.05f;
+        private float _brightnessChangeCountdown = 0;
 
         public void InitFields(Atom atom)
         {
@@ -60,6 +69,10 @@ namespace LFE
         public void InitUserInterface()
         {
             _initCompleted = false;
+
+            BrightnessPollIntervalStorable = new JSONStorableFloat("Brightness Poll Delay", BRIGHTNESS_POLL_DEFAULT, (float value) => { _detector.PollFrequency = value; }, 0f, 5f);
+            CreateSlider(BrightnessPollIntervalStorable);
+            RegisterFloat(BrightnessPollIntervalStorable);
 
             LightAdjustSpeedStorable = new JSONStorableFloat("Light Adjust Within", 3.50f, 0f, 10f);
             CreateSlider(LightAdjustSpeedStorable);
@@ -145,6 +158,7 @@ namespace LFE
 
             // create the camera that reads the light
             _detector = gameObject.AddComponent<BrightnessDetector>();
+            _detector.PollFrequency = BRIGHTNESS_POLL_DEFAULT;
             _detector.Detector.CopyFrom(CameraTarget.centerTarget.targetCamera);
             _detector.Detector.transform.parent = head.transform;
             _detector.Detector.transform.localPosition = detectorCameraOffset;
@@ -198,16 +212,6 @@ namespace LFE
             Destroy(_detector);
         }
 
-        void OnEnable()
-        {
-            _detector.gameObject.SetActive(true);
-        }
-
-        void OnDisable()
-        {
-            _detector.gameObject.SetActive(false);
-        }
-
         private void Update()
         {
             if (!_initCompleted) { return; }
@@ -215,6 +219,7 @@ namespace LFE
 
             try
             {
+                _brightnessChangeCountdown -= Time.deltaTime;
                 // run the scheduled animation
                 if (_currentAnimation != null)
                 {
@@ -251,11 +256,15 @@ namespace LFE
                 }
                 else
                 {
-                    // schedule brightness adjustment animation - override any currently running animation for this one. light always wins
-                    duration = targetValue > currentValue
-                        ? DarkAdjustSpeedStorable.val
-                        : LightAdjustSpeedStorable.val;
-                    _currentAnimation = new EyeDialationAnimation(currentValue, targetValue, duration, (p) => Easings.ElasticEaseOut(p));
+                    if (_brightnessChangeCountdown <= 0)
+                    {
+                        // schedule brightness adjustment animation - override any currently running animation for this one. light always wins
+                        duration = targetValue > currentValue
+                            ? DarkAdjustSpeedStorable.val
+                            : LightAdjustSpeedStorable.val;
+                        _currentAnimation = new EyeDialationAnimation(currentValue, targetValue, duration, (p) => Easings.ElasticEaseOut(p));
+                        _brightnessChangeCountdown = _brightnessChangeThrottle;
+                    }
                 }
 
                 _lastBrightness = brightness;
@@ -400,7 +409,7 @@ namespace LFE
         public Camera Detector { get; private set; }
         public float DetectedBrightness { get; private set; }
         public Color DetectedColor { get; private set; }
-        public float PollFrequency { get; private set; }
+        public float PollFrequency { get; set; }
 
         private float pollCountdown;
         private RenderTexture cameraRenderTexture;
@@ -409,8 +418,8 @@ namespace LFE
         void Awake()
         {
             pollCountdown = 0;
-            cameraRenderTexture = null;
             cameraTexture2d = new Texture2D(CAMERA_IMG_WITDH, CAMERA_IMG_HEIGHT);
+            cameraRenderTexture = new RenderTexture(CAMERA_IMG_WITDH, CAMERA_IMG_HEIGHT, 32);
 
             PollFrequency = 0.1f;
             DetectedBrightness = 0;
@@ -429,32 +438,33 @@ namespace LFE
 
         void Update()
         {
-            if (cameraRenderTexture != null)
+            if (Detector.targetTexture != null)
             {
                 // get a copy of the pixels into a Texture2D
-                if (cameraTexture2d.width != cameraRenderTexture.width || cameraTexture2d.height != cameraRenderTexture.height)
-                {
-                    cameraTexture2d.Resize(cameraRenderTexture.width, cameraRenderTexture.height);
-                }
+
+                // the script assumes the 2d and rendertexture are the same size if ever minds are changed this is a reminder
+                // if (cameraTexture2d.width != cameraRenderTexture.width || cameraTexture2d.height != cameraRenderTexture.height)
+                // {
+                //     cameraTexture2d.Resize(cameraRenderTexture.width, cameraRenderTexture.height);
+                // }
 
                 var previous = RenderTexture.active;
                 RenderTexture.active = cameraRenderTexture;
                 cameraTexture2d.ReadPixels(new Rect(0, 0, cameraRenderTexture.width, cameraRenderTexture.height), 0, 0);
-                cameraTexture2d.Apply();
+                cameraTexture2d.Apply(false, false);
                 RenderTexture.active = previous;
 
                 // average the colors in the image
                 var colors = cameraTexture2d.GetPixels32();
                 var total = colors.Length;
-                var r = 0; var g = 0; var b = 0; var a = 0;
+                var r = 0; var g = 0; var b = 0;
                 for (int i = 0; i < total; i++)
                 {
                     r += colors[i].r;
                     g += colors[i].g;
                     b += colors[i].b;
-                    a += colors[i].a;
                 }
-                var color = new Color(r / total, g / total, b / total, a / total);
+                var color = new Color(r / total, g / total, b / total);
                 // https://stackoverflow.com/questions/596216/formula-to-determine-brightness-of-rgb-color
                 var brightness = Math.Sqrt(
                     color.r * color.r * .299f +
@@ -472,10 +482,11 @@ namespace LFE
 #endif
 
                 // stop capturing the screen
-                Detector.depth -= 2;
                 Detector.targetTexture = null;
-                RenderTexture.ReleaseTemporary(cameraRenderTexture);
-                cameraRenderTexture = null;
+                if (PollFrequency > 0)
+                {
+                    Detector.enabled = false;
+                }
             }
 
             pollCountdown -= Time.deltaTime;
@@ -487,10 +498,12 @@ namespace LFE
             else
             {
                 // schedule the next update to capture the screen
+                if (PollFrequency > 0)
+                {
+                    Detector.enabled = true;
+                }
                 pollCountdown = PollFrequency;
-                cameraRenderTexture = RenderTexture.GetTemporary(CAMERA_IMG_WITDH, CAMERA_IMG_HEIGHT, 16);
                 Detector.targetTexture = cameraRenderTexture;
-                Detector.depth += 2;
             }
         }
 
@@ -499,8 +512,7 @@ namespace LFE
             if (cameraRenderTexture != null)
             {
                 Detector.targetTexture = null;
-                RenderTexture.ReleaseTemporary(cameraRenderTexture);
-                cameraRenderTexture = null;
+                Destroy(cameraRenderTexture);
             }
             Destroy(Detector);
             if (cameraTexture2d != null)
