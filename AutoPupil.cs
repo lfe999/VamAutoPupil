@@ -94,25 +94,41 @@ namespace LFE
             CreateSlider(IdleMaxDelayStorable, rightSide: true);
             RegisterFloat(IdleMaxDelayStorable);
 
-            _screenAtomUid = new JSONStorableString("DetectorAtomUid", GenerateAtomName("LightDetector", 5)); // save this so we can restore it
+            _screenAtomUid = new JSONStorableString("DetectorAtomUid", String.Empty);
+            RegisterString(_screenAtomUid);
         }
 
+        private bool _uiCreated = false;
         public override void Init()
         {
+#if LFE_DEBUG
+            SuperController.LogMessage("Init()");
+#endif
             if (containingAtom.type != "Person")
             {
                 SuperController.LogError($"This plugin needs to be put on a 'Person' atom only, not a '{containingAtom.type}'");
                 return;
             }
 
+            InitFields(containingAtom);
+            InitUserInterface();
+            _uiCreated = true;
+        }
+
+        public void OnEnable() {
             StartCoroutine(InitCoroutine());
         }
 
         private IEnumerator InitCoroutine()
         {
-
-            InitFields(containingAtom);
-            InitUserInterface();
+            yield return new WaitUntil(() => _uiCreated);
+// #if LFE_DEBUG
+//             SuperController.LogMessage($"isLoading: {SuperController.singleton.isLoading}");
+// #endif
+//             yield return new WaitUntil(() => SuperController.singleton.isLoading == false);
+// #if LFE_DEBUG
+//             SuperController.LogMessage($"isLoading: {SuperController.singleton.isLoading}");
+// #endif
 
             // find any unused layer mask and just pick that
             _layerMask = Enumerable.Range(0, 31).FirstOrDefault(i => LayerMask.LayerToName(i).Equals(""));
@@ -124,20 +140,33 @@ namespace LFE
 
             var sc = SuperController.singleton;
             var head = containingAtom.rigidbodies.FirstOrDefault(rb => rb.name.Equals("head"));
+
+            if(_screenAtomUid.val == String.Empty) {
+                _screenAtomUid.val = GenerateAtomName("LightDetector", 5);
+            }
             var screen = sc.GetAtomByUid(_screenAtomUid.val);
 
             // create the screen that the camera will be looking at for light colors
             // place it on a special layer so we can show just this later on
             if (screen == null)
             {
+#if LFE_DEBUG
+                SuperController.LogMessage($"creating ImagePanel: {_screenAtomUid.val}");
+#endif
                 yield return sc.AddAtomByType("ImagePanel", useuid: _screenAtomUid.val);
                 screen = sc.GetAtomByUid(_screenAtomUid.val);
             }
-            var imageObject = screen.transform.Find("reParentObject/object");
+#if LFE_DEBUG
+            else {
+                SuperController.LogMessage($"reusing ImagePanel: {_screenAtomUid.val}");
+            }
+#endif
+            var imageObject = screen.reParentObject.Find("object");
             var detectorOffset = (Vector3.up * 0.06f) + (Vector3.forward * 0.11f);
             var detectorCameraOffset = detectorOffset + (Vector3.forward * 0.05f);
 
             screen.hidden = true;
+            screen.collisionEnabledJSON.val = false;
             foreach (var t in ChildTransforms(imageObject))
             {
                 t.gameObject.layer = _layerMask;
@@ -194,7 +223,7 @@ namespace LFE
             _initCompleted = true;
         }
 
-        public void OnDestroy()
+        public void OnDisable()
         {
             if (_pupilMorph != null)
             {
